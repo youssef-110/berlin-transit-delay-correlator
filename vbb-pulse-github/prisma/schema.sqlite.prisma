@@ -1,0 +1,97 @@
+// VBB Pulse – data model
+// Local dev: SQLite (zero config). Production: change `provider` to "postgresql"
+// and point DATABASE_URL at your Postgres instance, then run `prisma migrate deploy`.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id               String   @id @default(cuid())
+  email            String   @unique
+  passwordHash     String
+  /// Alert only if delay >= this many minutes
+  delayThresholdMin Int     @default(5)
+  /// Minimum minutes between two alerts for the same tracked line
+  cooldownMinutes  Int      @default(60)
+  /// Quiet hours in Europe/Berlin local time, "HH:MM" (null = disabled)
+  quietHoursStart  String?
+  quietHoursEnd    String?
+  emailEnabled     Boolean  @default(true)
+  /// Automatically email on major city-wide disruptions (weather, arena events, trunk line failures)
+  cityAlertsEnabled Boolean @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  trackedLines TrackedLine[]
+  alertStates  AlertState[]
+  alertLogs    AlertLog[]
+}
+
+/// A line the user commutes on, observed at a specific stop
+/// (optionally filtered by direction, e.g. "Ahrensfelde").
+model TrackedLine {
+  id         String   @id @default(cuid())
+  userId     String
+  lineName   String   // e.g. "S7", "RE1", "U2", "M10"
+  stopId     String   // VBB/HAFAS stop id, e.g. "900230999" (S Potsdam Hbf)
+  stopName   String
+  direction  String   @default("") // optional substring match on departure.direction ("" = any)
+  createdAt  DateTime @default(now())
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  alertStates AlertState[]
+
+  @@unique([userId, lineName, stopId, direction])
+  @@index([stopId])
+}
+
+/// Idempotency / alert-hash table. One row per (user, tracked line).
+/// Used by the notifier to suppress duplicate alerts for ongoing disruptions.
+model AlertState {
+  id                  String    @id @default(cuid())
+  userId              String
+  lineId              String
+  disruptionSignature String
+  lastStatus          String    // "DELAYED" | "CANCELLED"
+  lastDelayMin        Int
+  lastNotifiedAt      DateTime?
+  firstSeenAt         DateTime  @default(now())
+  lastSeenAt          DateTime  @default(now())
+  resolvedAt          DateTime?
+
+  user User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  line TrackedLine @relation(fields: [lineId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, lineId])
+  @@index([disruptionSignature])
+}
+
+/// Immutable history of dispatched alert emails (incl. test emails).
+model AlertLog {
+  id          String   @id @default(cuid())
+  userId      String
+  lineName    String
+  stopName    String
+  direction   String?
+  status      String   // "DELAYED" | "CANCELLED"
+  delayMin    Int
+  reason      String   // "NEW" | "ESCALATED" | "TEST"
+  context     String   // JSON: correlation insights
+  subject     String
+  emailHtml   String
+  transport   String   // "resend" | "smtp" | "console"
+  delivered   Boolean
+  error       String?
+  isTest      Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
